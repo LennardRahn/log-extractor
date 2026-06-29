@@ -21,22 +21,15 @@ Each parameter line has the shape `id:address  name = value [unit]`:
 * `value`   — the returned value (numeric, or `nan`/`inf`)
 * `unit`    — optional, may contain non-ASCII characters (e.g. `°C×100`)
 
-## Reconstruction, not whitespace guessing
-
-The dumps are corrupted by `prometheus add` output interleaved into the same
-terminal stream, sometimes *inside* a record — splitting a value across lines
-or jamming tokens together. Since **no telemetry field contains internal
-whitespace** (spaces only separate fields), records are rebuilt from the known
-grammar `id:address  name = value [unit]` rather than by guessing where spaces
-were lost. After removing the injected fragment, all whitespace is stripped and
-the record is re-parsed by structure, then re-emitted in canonical form. This
-avoids the earlier heuristic that corrupted scientific notation
-(e.g. `1e3` → `1 e3`).
+Note that values may be **arrays** with internal spaces (e.g.
+`[62 112 135 53]`, `[-nan nan -nan]`), so a field is not simply a
+whitespace-delimited token — the parser splits an array value at its closing
+`]` and treats the rest as the unit.
 
 ## Usage
 
 1. **Clean** the raw terminal dump (strip ANSI codes, drop injected
-   `prometheus add` lines, reconstruct split records):
+   `prometheus add` lines, reassemble split records):
 
    ```
    # configure INPUT_PATHS in extractor.py, then:
@@ -45,13 +38,17 @@ avoids the earlier heuristic that corrupted scientific notation
 
    This writes a `*_cleaned.log` next to each input.
 
-2. **Parse** the cleaned log into structured records (optional — CSV export):
+2. **Parse** the cleaned log into a CSV of telemetry readings:
 
    ```
    python3 parser.py path/to/file_cleaned.log
    ```
 
-   Each record carries `timestamp, id, address, name, value, unit`, with every
-   parameter associated to the most recently seen `Timestamp`. `parser.py` is
-   also usable as a library (`parse_cleaned`, `canonicalize`) if you already
-   have your own exporter.
+   This writes a `*.csv` with columns `timestamp, id, address, name, value,
+   unit` — one row per reading, each associated with the most recently seen
+   `Timestamp`. Lines that are not parameter readings (shell output, `HK:` /
+   `[drun]` messages, the `list add` catalogue) are ignored. `parser.py` is
+   also usable as a library via `parse_cleaned()`.
+
+   The same `Timestamp` can appear in several blocks (a re-fetch), so a given
+   `(timestamp, id, address)` may legitimately occur more than once.

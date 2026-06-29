@@ -1,24 +1,27 @@
-"""Parse and reconstruct CSP Shell telemetry records.
+"""Parse cleaned CSP Shell telemetry dumps into structured records / CSV.
 
-A telemetry response is a sequence of timestamped blocks::
+A cleaned log (produced by ``extractor.py``) interleaves ordinary shell output
+with telemetry blocks. Each block is introduced by a ``Timestamp`` line and
+followed by parameter readings::
 
-    Timestamp 7858853
-    30:5378  mcu_temp             = 405 °C×100
-    143:5398  mrpm                 = 199720
+    Timestamp 7688335
+    30:5378 mcu_temp = 290 °C×100
+    120:5378 mppt_temp = [62 112 135 53] °C×100
+    143:5397 mrpm = 199939
+    230:5398 temp_brd = -325 degC
 
 Each parameter line has the shape ``id:address  name = value [unit]`` where:
 
 * ``id``      is the parameter id
 * ``address`` is the physical module address
-* ``name``    is the human-readable parameter name (an identifier)
-* ``value``   is the returned value (numeric, or nan/inf)
-* ``unit``    is optional and may contain non-ASCII characters (e.g. ``°C×100``)
+* ``name``    is the parameter name
+* ``value``   is either a scalar (number / nan / inf) or an ``[ ... ]`` array
+              whose elements are space-separated
+* ``unit``    is optional (e.g. ``°C×100``, ``mV``, ``deg/s``, ``Am²``)
 
-Crucially, **no field contains internal whitespace** — spaces only ever
-separate fields. That fact is what makes robust reconstruction possible: when
-interleaved output (see ``extractor.py``) jams tokens together or splits a
-value, the original spacing cannot be recovered by guessing, but it does not
-need to be — the grammar alone determines where each field begins and ends.
+Each reading is associated with the most recently seen ``Timestamp``. Lines
+that are not parameter readings (shell output, ``HK:``/``[drun]`` messages, the
+``list add`` parameter catalogue, etc.) are ignored.
 """
 
 import csv
@@ -28,26 +31,13 @@ from pathlib import Path
 from typing import List, Optional
 
 
-# A line that introduces a new telemetry block: "Timestamp 7858853"
+# A line that introduces a new telemetry block: "Timestamp 7688335"
 TIMESTAMP_LINE = re.compile(r'^Timestamp\s+(\d+)\s*$', re.IGNORECASE)
 
-# Numeric value: scientific notation, plain float/int, nan, inf variants.
-# Mirrors the value grammar used in extractor.py.
-_VALUE = r'[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][+\-]?\d+)?|[-+]?nan|[-+]?inf'
-
-# The record grammar applied to a *whitespace-free* token string. Because no
-# field may contain a space, removing all whitespace first and matching this
-# pattern reconstructs the fields by structure rather than by guessing where
-# spaces belonged. ``name`` must start with a letter/underscore so the boundary
-# with the preceding numeric address is unambiguous; ``value`` is matched
-# greedily so the unit (anything left over) starts at the first non-numeric
-# character.
-PARAM_DENSE = re.compile(
-    rf'^(?P<id>\d+):(?P<address>\d+)'
-    rf'(?P<name>[A-Za-z_]\w*)='
-    rf'(?P<value>{_VALUE})'
-    rf'(?P<unit>\S+)?$',
-    re.IGNORECASE,
+# A parameter reading: "id:address  name = <rest>". The value/unit split inside
+# <rest> is handled separately because array values contain internal spaces.
+PARAM_LINE = re.compile(
+    r'^(?P<id>\d+):(?P<address>\d+)\s+(?P<name>\S+)\s*=\s*(?P<rest>.+?)\s*$'
 )
 
 
@@ -61,43 +51,24 @@ class Record:
     unit: Optional[str]
 
 
-def _match_dense(text: str):
-    """Match ``text`` against the record grammar, ignoring all whitespace."""
-    return PARAM_DENSE.match(re.sub(r'\s+', '', text))
+def _split_value_unit(rest: str):
+    """Split the text after '=' into (value, unit).
 
-
-def canonicalize(record: str) -> Optional[str]:
-    """Reconstruct ``record`` into canonical ``id:address  name = value [unit]``.
-
-    Whitespace in the input is ignored, so a record whose internal spacing was
-    destroyed by interleaved output is recovered by structure. Returns ``None``
-    if ``record`` is not a parameter record (e.g. a header or status line),
-    leaving the caller free to keep it verbatim.
+    Arrays keep their internal spaces: the value runs to the closing ']' and
+    anything after it is the unit. Scalars take the first whitespace-delimited
+    token as the value and the remainder (if any) as the unit.
     """
-    m = _match_dense(record)
-    if not m:
-        return None
-    base = (
-        f"{int(m.group('id'))}:{int(m.group('address'))}  "
-        f"{m.group('name')} = {m.group('value')}"
-    )
-    unit = m.group('unit')
-    return f"{base} {unit}" if unit else base
-
-
-def parse_record(record: str, timestamp: Optional[int] = None) -> Optional[Record]:
-    """Parse a single record line into a :class:`Record`, or ``None``."""
-    m = _match_dense(record)
-    if not m:
-        return None
-    return Record(
-        timestamp=timestamp,
-        id=int(m.group('id')),
-        address=int(m.group('address')),
-        name=m.group('name'),
-        value=m.group('value'),
-        unit=m.group('unit'),
-    )
+    rest = rest.strip()
+    if rest.startswith('['):
+        end = rest.find(']')
+        if end != -1:
+            value = rest[:end + 1]
+            unit = rest[end + 1:].strip()
+            return value, (unit or None)
+    parts = rest.split(None, 1)
+    value = parts[0]
+    unit = parts[1].strip() if len(parts) > 1 else None
+    return value, unit
 
 
 def parse_cleaned(text: str) -> List[Record]:
@@ -114,9 +85,26 @@ def parse_cleaned(text: str) -> List[Record]:
             current_ts = int(ts.group(1))
             continue
 
-        rec = parse_record(line, current_ts)
-        if rec is not None:
-            records.append(rec)
+        # Only collect readings once we're inside a timestamped block; this
+        # skips the parameter catalogue and other pre-telemetry noise.
+        if current_ts is None:
+            continue
+
+        m = PARAM_LINE.match(line)
+        if not m:
+            continue
+
+        value, unit = _split_value_unit(m.group('rest'))
+        records.append(
+            Record(
+                timestamp=current_ts,
+                id=int(m.group('id')),
+                address=int(m.group('address')),
+                name=m.group('name'),
+                value=value,
+                unit=unit,
+            )
+        )
 
     return records
 
