@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+from parser import canonicalize
+
 
 # ── Configure your input files here ──────────────────────────────────────────
 INPUT_PATHS = [
@@ -28,15 +30,6 @@ INLINE_PROM = re.compile(
 # Any ANSI/VT100 escape sequence
 ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*m')
 
-# Restore space after '=' when a prometheus fragment was removed right after it
-# e.g.  "= prometheus add …\n90.000" → after removal → "=90.000"
-EQUALS_NOSPACE = re.compile(r'=(\S)')
-
-# Restore space between id:address and param name when a prometheus fragment
-# was removed right after the address digits
-# e.g.  "306:5387prometheus add …\n  ref_q" → after removal → "306:5387ref_q"
-DIGIT_LETTER = re.compile(r'(\d)([A-Za-z_])')
-
 # A [90m ... [0m record block, possibly spanning multiple lines
 RECORD = re.compile(r'\x1b\[90m(.*?)\x1b\[0m', re.DOTALL)
 
@@ -61,16 +54,21 @@ def clean_log(text: str) -> str:
 
         # ── The record itself ─────────────────────────────────────────────
         # Prometheus lines may have been injected into the middle of the
-        # [90m...[0m block, splitting the value across lines. Remove those
-        # fragments first, then collapse the remaining content back into a
-        # single clean line and fix any spacing artifacts.
-        inner = m.group(1)
-        inner = INLINE_PROM.sub('', inner)  # remove injected fragments
-        inner = ' '.join(inner.split())  # collapse newlines + spaces
-        inner = EQUALS_NOSPACE.sub(r'= \1', inner)  # restore space after =
-        inner = DIGIT_LETTER.sub(r'\1 \2', inner)  # restore space between id:addr and param name
-        if inner.strip():
-            result_lines.append(inner.rstrip())
+        # [90m...[0m block, splitting a value or jamming tokens together.
+        # Remove those fragments, then rebuild the record from its grammar:
+        # since no field contains internal whitespace, canonicalize() recovers
+        # the fields by structure instead of guessing where spaces belonged
+        # (which used to corrupt e.g. scientific notation like "1e3" → "1 e3").
+        inner = INLINE_PROM.sub('', m.group(1))
+        canon = canonicalize(inner)
+        if canon is not None:
+            result_lines.append(canon)
+        else:
+            # Not a parameter record (header/status text): keep it verbatim,
+            # just collapsed onto one line with ANSI codes already stripped.
+            collapsed = ' '.join(inner.split())
+            if collapsed:
+                result_lines.append(collapsed)
 
     # ── Tail after the last record ────────────────────────────────────────
     tail = text[last_end:]
