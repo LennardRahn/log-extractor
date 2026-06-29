@@ -6,10 +6,10 @@ A cleaned log (see ``extractor.py``) is a sequence of timestamped blocks::
     30:5378  mcu_temp             = 405 °C×100
     143:5398  mrpm                 = 199720
 
-Each parameter line has the shape ``address:id  name = value [unit]`` where:
+Each parameter line has the shape ``id:address  name = value [unit]`` where:
 
+* ``id``      is the parameter id
 * ``address`` is the physical module address
-* ``id``      is the parameter id at that address
 * ``name``    is the human-readable parameter name
 * ``value``   is the returned value (numeric, or nan/inf)
 * ``unit``    is optional and may contain non-ASCII characters (e.g. ``°C×100``)
@@ -34,7 +34,7 @@ _VALUE = r'[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][+\-]?\d+)?|[-+]?nan|[-+]?inf'
 
 # A parameter line: "143:5398  mrpm  = 199720" with an optional trailing unit.
 PARAM_LINE = re.compile(
-    rf'^(?P<address>\d+):(?P<id>\d+)\s+'
+    rf'^(?P<id>\d+):(?P<address>\d+)\s+'
     rf'(?P<name>\S+)\s*=\s*'
     rf'(?P<value>{_VALUE})'
     rf'(?:\s+(?P<unit>\S.*?))?\s*$',
@@ -45,8 +45,8 @@ PARAM_LINE = re.compile(
 @dataclass
 class Record:
     timestamp: Optional[int]
-    address: int
     id: int
+    address: int
     name: str
     value: str
     unit: Optional[str]
@@ -88,7 +88,7 @@ def parse_cleaned(text: str) -> List[Record]:
 
 
 def write_csv(records: List[Record], dest: Path) -> None:
-    fields = ['timestamp', 'address', 'id', 'name', 'value', 'unit']
+    fields = ['timestamp', 'id', 'address', 'name', 'value', 'unit']
     with dest.open('w', encoding='utf-8', newline='') as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
         writer.writeheader()

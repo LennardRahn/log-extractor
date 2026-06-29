@@ -13,10 +13,10 @@ Timestamp 7858853
 143:5398  mrpm                 = 199720
 ```
 
-Each parameter line has the shape `address:id  name = value [unit]`:
+Each parameter line has the shape `id:address  name = value [unit]`:
 
+* `id`      — the parameter id
 * `address` — the physical module address
-* `id`      — the parameter id at that address
 * `name`    — the parameter name
 * `value`   — the returned value (numeric, or `nan`/`inf`)
 * `unit`    — optional, may contain non-ASCII characters (e.g. `°C×100`)
@@ -42,5 +42,5 @@ Two stages:
    python3 parser.py --format json path/to/file_cleaned.log
    ```
 
-   Each record carries `timestamp, address, id, name, value, unit`, with every
+   Each record carries `timestamp, id, address, name, value, unit`, with every
    parameter associated to the most recently seen `Timestamp`.
